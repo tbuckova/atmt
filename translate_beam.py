@@ -20,8 +20,8 @@ def get_args():
     parser.add_argument('--seed', default=42, type=int, help='pseudo random number generator seed')
 
     # Add data arguments
-    parser.add_argument('--data', default='indomain/prepared_data', help='path to data directory')
-    parser.add_argument('--checkpoint-path', default='checkpoints/checkpoint_best.pt', help='path to the model file')
+    parser.add_argument('--data', default='data_asg4/prepared_data', help='path to data directory')
+    parser.add_argument('--checkpoint-path', default='checkpoints_asg4/checkpoint_best.pt', help='path to the model file')
     parser.add_argument('--batch-size', default=None, type=int, help='maximum number of sentences in a batch')
     parser.add_argument('--output', default='model_translations.txt', type=str,
                         help='path to the output file destination')
@@ -29,6 +29,7 @@ def get_args():
 
     # Add beam search arguments
     parser.add_argument('--beam-size', default=5, type=int, help='number of hypotheses expanded in beam search')
+    parser.add_argument('--alpha', default=0.6, type=float, help='length normalization parameter alpha')
 
     return parser.parse_args()
 
@@ -79,19 +80,28 @@ def main(args):
         with torch.no_grad():
             # Compute the encoder output
             encoder_out = model.encoder(sample['src_tokens'], sample['src_lengths'])
+
+            #print("encoder \n",encoder_out)
+
             go_slice = \
                 torch.ones(sample['src_tokens'].shape[0], 1).fill_(tgt_dict.eos_idx).type_as(sample['src_tokens'])
 
             # Compute the decoder output at the first time step
             decoder_out, _ = model.decoder(go_slice, encoder_out)
 
+            #print("decoder\n",decoder_out)
+
             # __QUESTION 1: What happens here and what do 'log_probs' and 'next_candidates' contain?
             log_probs, next_candidates = torch.topk(torch.log(torch.softmax(decoder_out, dim=2)),
                                                     args.beam_size+1, dim=-1)
 
+            #print("log_probs\n", log_probs[0][0][0]) #,"\n next_candidates\n",next_candidates)
+
         # Create number of beam_size beam search nodes for every input sentence
         for i in range(batch_size):
+            #print("i",i)
             for j in range(args.beam_size):
+                #print("j",j)
                 # __QUESTION 2: Why do we need backoff candidates?
                 best_candidate = next_candidates[i, :, j]
                 backoff_candidate = next_candidates[i, :, j+1]
@@ -115,9 +125,10 @@ def main(args):
                 node = BeamSearchNode(searches[i], emb, lstm_out, final_hidden, final_cell,
                                       mask, torch.cat((go_slice[i], next_word)), log_p, 1)
                 searches[i].add(-node.eval(), node)
+                #print("node\n",-node.eval())
 
         # Start generating further tokens until max sentence length reached
-        for _ in range(args.max_len-1):
+        for depth in range(args.max_len-1):
 
             # Get the current nodes to expand
             nodes = [n[1] for s in searches for n in s.get_current_beams()]
@@ -142,6 +153,21 @@ def main(args):
 
             # see __QUESTION 1
             log_probs, next_candidates = torch.topk(torch.log(torch.softmax(decoder_out, dim=2)), args.beam_size+1, dim=-1)
+
+            lp = ((5 + depth + 2)**args.alpha)/(5 + 1)**args.alpha
+            #print("log_probs\n", log_probs.shape[1], log_probs)
+            #print("depth\n",depth+2)
+
+            for i in range(log_probs.shape[0]):
+            	for j in range(log_probs.shape[1]):
+            		for k in range(log_probs.shape[2]):
+            			log_probs[i,j,k] = log_probs[i,j,k]/lp
+
+
+
+            #log_probs = [prob/lp for prob in log_probs]
+
+            #print("log_probs/lp\n", log_probs)
 
             # Create number of beam_size next nodes for every current node
             for i in range(log_probs.shape[0]):
@@ -184,6 +210,7 @@ def main(args):
 
         # Segment into sentences
         best_sents = torch.stack([search.get_best()[1].sequence[1:] for search in searches])
+        #print("best sents\n",best_sents)
         decoded_batch = best_sents.numpy()
 
         output_sentences = [decoded_batch[row, :] for row in range(decoded_batch.shape[0])]
@@ -191,12 +218,16 @@ def main(args):
         # __QUESTION 6: What is the purpose of this for loop?
         temp = list()
         for sent in output_sentences:
+            #print("output sentence\n",sent)
+
             first_eos = np.where(sent == tgt_dict.eos_idx)[0]
+            #print("first eos\n",first_eos)
             if len(first_eos) > 0:
                 temp.append(sent[:first_eos[0]])
             else:
                 temp.append(sent)
         output_sentences = temp
+        #print("output_sentences\n",output_sentences)
 
         # Convert arrays of indices into strings of words
         output_sentences = [tgt_dict.string(sent) for sent in output_sentences]
