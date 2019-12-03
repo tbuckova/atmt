@@ -26,10 +26,13 @@ def get_args():
     parser.add_argument('--output', default='model_translations.txt', type=str,
                         help='path to the output file destination')
     parser.add_argument('--max-len', default=25, type=int, help='maximum length of generated sequence')
+    parser.add_argument('--nbest-out', default='nbest_translations_diverse.txt', type=str, help='path to n best sentences file destination')
 
     # Add beam search arguments
     parser.add_argument('--beam-size', default=5, type=int, help='number of hypotheses expanded in beam search')
     parser.add_argument('--alpha', default=0.6, type=float, help='length normalization parameter alpha')
+    parser.add_argument('--gama', default=0.6, type=float, help='diversity normalization parameter alpha')    
+    parser.add_argument('--n', default=3, type=int, help='n best sentences')    
 
     return parser.parse_args()
 
@@ -154,21 +157,16 @@ def main(args):
             # see __QUESTION 1
             log_probs, next_candidates = torch.topk(torch.log(torch.softmax(decoder_out, dim=2)), args.beam_size+1, dim=-1)
 
+            #implementation part 3 and 4
             lp = ((5 + depth + 2)**args.alpha)/(5 + 1)**args.alpha
-            #print("log_probs\n", log_probs.shape[1], log_probs)
-            #print("depth\n",depth+2)
 
             for i in range(log_probs.shape[0]):
             	for j in range(log_probs.shape[1]):
             		for k in range(log_probs.shape[2]):
-            			log_probs[i,j,k] = log_probs[i,j,k]/lp
+            			log_probs[i,j,k] = log_probs[i,j,k]/lp - args.gama*(k+1)
 
-
-
-            #log_probs = [prob/lp for prob in log_probs]
-
-            #print("log_probs/lp\n", log_probs)
-
+            #end of part 3 and 4
+           
             # Create number of beam_size next nodes for every current node
             for i in range(log_probs.shape[0]):
                 for j in range(args.beam_size):
@@ -208,10 +206,20 @@ def main(args):
             for search in searches:
                 search.prune()
 
-        # Segment into sentences
-        best_sents = torch.stack([search.get_best()[1].sequence[1:] for search in searches])
-        #print("best sents\n",best_sents)
-        decoded_batch = best_sents.numpy()
+        #best_sents = torch.stack([search.get_best()[1].sequence[1:] for search in searches])
+        #nbest_sents = torch.stack(1)
+        for search in searches:
+            nbest = search.get_nbest(args.n)
+            #print("nbest\n",nbest)
+            #while not nbest.empty():
+            s1 = nbest.get()
+            s2 = nbest.get()
+            s3 = nbest.get()
+            nbest_sents = torch.stack((s1[1].sequence[1:],s2[1].sequence[1:],s3[1].sequence[1:]))
+
+
+        #print("nbest sents\n",nbest_sents)
+        decoded_batch = nbest_sents.numpy()
 
         output_sentences = [decoded_batch[row, :] for row in range(decoded_batch.shape[0])]
 
@@ -231,16 +239,21 @@ def main(args):
 
         # Convert arrays of indices into strings of words
         output_sentences = [tgt_dict.string(sent) for sent in output_sentences]
+        #print("output sentences\n",output_sentences)
 
         for ii, sent in enumerate(output_sentences):
-            all_hyps[int(sample['id'].data[ii])] = sent
+            #print("ii ",ii,"\nsent ",sent,"\nsample ",sample['id'])
+            if int(sample['id'].data[0]) in all_hyps:
+                all_hyps[int(sample['id'].data[0])].append(sent)
+            else:
+            	all_hyps[int(sample['id'].data[0])] = [sent]
+            #print("all_hyps\n",all_hyps)
 
-
-    # Write to file
-    if args.output is not None:
-        with open(args.output, 'w') as out_file:
+    # Write to file n best
+    if args.nbest_out is not None:
+        with open(args.nbest_out, 'w') as out_file:
             for sent_id in range(len(all_hyps.keys())):
-                out_file.write(all_hyps[sent_id] + '\n')
+                out_file.write('\n '.join(all_hyps[sent_id]) + '\n\n')
 
 
 if __name__ == '__main__':
